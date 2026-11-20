@@ -1,0 +1,262 @@
+"use client"
+
+import { useEffect, useState, useRef } from "react"
+import { Switch } from "./ui/switch"
+import { FolderOpen } from "lucide-react"
+import { invoke } from "@tauri-apps/api/core"
+import Analytics from "@/lib/analytics"
+import AnalyticsConsentSwitch from "./AnalyticsConsentSwitch"
+import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
+import { toast } from "sonner"
+
+export function PreferenceSettings() {
+  const {
+    notificationSettings,
+    storageLocations,
+    isLoadingPreferences,
+    loadPreferences,
+    updateNotificationSettings
+  } = useConfig();
+
+  const [notificationsEnabled, setNotificationsEnabled] = useState<boolean | null>(null);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [previousNotificationsEnabled, setPreviousNotificationsEnabled] = useState<boolean | null>(null);
+  const hasTrackedViewRef = useRef(false);
+  const [changingFolder, setChangingFolder] = useState(false);
+  const [recordingsPath, setRecordingsPath] = useState<string | null>(null);
+
+  // Lazy load preferences on mount (only loads if not already cached)
+  useEffect(() => {
+    loadPreferences();
+    // Reset tracking ref on mount (every tab visit)
+    hasTrackedViewRef.current = false;
+  }, [loadPreferences]);
+
+  // Track preferences viewed analytics on every tab visit (once per mount)
+  useEffect(() => {
+    if (hasTrackedViewRef.current) return;
+
+    const trackPreferencesViewed = async () => {
+      // Wait for notification settings to be available (either from cache or after loading)
+      if (notificationSettings) {
+        await Analytics.track('preferences_viewed', {
+          notifications_enabled: notificationSettings.notification_preferences.show_recording_started ? 'true' : 'false'
+        });
+        hasTrackedViewRef.current = true;
+      } else if (!isLoadingPreferences) {
+        // If not loading and no settings available, track with default value
+        await Analytics.track('preferences_viewed', {
+          notifications_enabled: 'false'
+        });
+        hasTrackedViewRef.current = true;
+      }
+    };
+
+    trackPreferencesViewed();
+  }, [notificationSettings, isLoadingPreferences]);
+
+  // Update notificationsEnabled when notificationSettings are loaded from global state
+  useEffect(() => {
+    if (notificationSettings) {
+      // Notification enabled means both started and stopped notifications are enabled
+      const enabled =
+        notificationSettings.notification_preferences.show_recording_started &&
+        notificationSettings.notification_preferences.show_recording_stopped;
+      setNotificationsEnabled(enabled);
+      if (isInitialLoad) {
+        setPreviousNotificationsEnabled(enabled);
+        setIsInitialLoad(false);
+      }
+    } else if (!isLoadingPreferences) {
+      // If not loading and no settings, use default
+      setNotificationsEnabled(true);
+      if (isInitialLoad) {
+        setPreviousNotificationsEnabled(true);
+        setIsInitialLoad(false);
+      }
+    }
+  }, [notificationSettings, isLoadingPreferences, isInitialLoad])
+
+  useEffect(() => {
+    // Skip update on initial load or if value hasn't actually changed
+    if (isInitialLoad || notificationsEnabled === null || notificationsEnabled === previousNotificationsEnabled) return;
+    if (!notificationSettings) return;
+
+    const handleUpdateNotificationSettings = async () => {
+      console.log("Updating notification settings to:", notificationsEnabled);
+
+      try {
+        // Update the notification preferences
+        const updatedSettings: NotificationSettings = {
+          ...notificationSettings,
+          notification_preferences: {
+            ...notificationSettings.notification_preferences,
+            show_recording_started: notificationsEnabled,
+            show_recording_stopped: notificationsEnabled,
+          }
+        };
+
+        console.log("Calling updateNotificationSettings with:", updatedSettings);
+        await updateNotificationSettings(updatedSettings);
+        setPreviousNotificationsEnabled(notificationsEnabled);
+        console.log("Successfully updated notification settings to:", notificationsEnabled);
+
+        // Track notification preference change - only fires when user manually toggles
+        await Analytics.track('notification_settings_changed', {
+          notifications_enabled: notificationsEnabled.toString()
+        });
+      } catch (error) {
+        console.error('Failed to update notification settings:', error);
+      }
+    };
+
+    handleUpdateNotificationSettings();
+  }, [notificationsEnabled, notificationSettings, isInitialLoad, previousNotificationsEnabled, updateNotificationSettings])
+
+  // Let the user pick a custom recordings directory via the native dialog.
+  const handleChangeRecordingsFolder = async () => {
+    setChangingFolder(true);
+    try {
+      const picked = await invoke<string | null>('select_recording_folder');
+      if (picked) {
+        setRecordingsPath(picked);
+        toast.success('录音存储位置已更新', { description: picked });
+        await Analytics.track('storage_folder_changed', { folder_type: 'recordings' });
+      }
+    } catch (error) {
+      console.error('Failed to change recordings folder:', error);
+      toast.error('更改录音存储位置失败', { description: String(error) });
+    } finally {
+      setChangingFolder(false);
+    }
+  };
+
+  const handleOpenFolder = async (folderType: 'database' | 'models' | 'recordings') => {
+    try {
+      switch (folderType) {
+        case 'database':
+          await invoke('open_database_folder');
+          break;
+        case 'models':
+          await invoke('open_models_folder');
+          break;
+        case 'recordings':
+          await invoke('open_recordings_folder');
+          break;
+      }
+
+      // Track storage folder access
+      await Analytics.track('storage_folder_opened', {
+        folder_type: folderType
+      });
+    } catch (error) {
+      console.error(`Failed to open ${folderType} folder:`, error);
+    }
+  };
+
+  // Show loading only if we're actually loading and don't have cached data
+  if (isLoadingPreferences && !notificationSettings && !storageLocations) {
+    return <div className="max-w-2xl mx-auto p-6">Loading Preferences...</div>
+  }
+
+  // Show loading if notificationsEnabled hasn't been determined yet
+  if (notificationsEnabled === null && !isLoadingPreferences) {
+    return <div className="max-w-2xl mx-auto p-6">Loading Preferences...</div>
+  }
+
+  // Ensure we have a boolean value for the Switch component
+  const notificationsEnabledValue = notificationsEnabled ?? false;
+
+  return (
+    <div className="space-y-6">
+      {/* Notifications Section */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">通知</h3>
+            <p className="text-sm text-gray-600">开启或关闭会议开始、结束的通知提醒</p>
+          </div>
+          <Switch checked={notificationsEnabledValue} onCheckedChange={setNotificationsEnabled} />
+        </div>
+      </div>
+
+      {/* Data Storage Locations Section */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">数据存储位置</h3>
+        <p className="text-sm text-gray-600 mb-6">
+          查看并管理 Meetily 存储数据的位置
+        </p>
+
+        <div className="space-y-4">
+          {/* Database Location */}
+          {/* <div className="p-4 border rounded-lg bg-gray-50">
+            <div className="font-medium mb-2">Database</div>
+            <div className="text-sm text-gray-600 mb-3 break-all font-mono text-xs">
+              {storageLocations?.database || 'Loading...'}
+            </div>
+            <button
+              onClick={() => handleOpenFolder('database')}
+              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 transition-colors"
+            >
+              <FolderOpen className="w-4 h-4" />
+              Open Folder
+            </button>
+          </div> */}
+
+          {/* Models Location */}
+          {/* <div className="p-4 border rounded-lg bg-gray-50">
+            <div className="font-medium mb-2">Whisper Models</div>
+            <div className="text-sm text-gray-600 mb-3 break-all font-mono text-xs">
+              {storageLocations?.models || 'Loading...'}
+            </div>
+            <button
+              onClick={() => handleOpenFolder('models')}
+              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 transition-colors"
+            >
+              <FolderOpen className="w-4 h-4" />
+              Open Folder
+            </button>
+          </div> */}
+
+          {/* Recordings Location */}
+          <div className="p-4 border rounded-lg bg-gray-50">
+            <div className="font-medium mb-2">会议录音</div>
+            <div className="text-sm text-gray-600 mb-3 break-all font-mono text-xs">
+              {recordingsPath || storageLocations?.recordings || '加载中…'}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleChangeRecordingsFolder}
+                disabled={changingFolder}
+                className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 transition-colors disabled:opacity-50"
+              >
+                <FolderOpen className="w-4 h-4" />
+                {changingFolder ? '选择中…' : '更改位置'}
+              </button>
+              <button
+                onClick={() => handleOpenFolder('recordings')}
+                className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 transition-colors"
+              >
+                打开文件夹
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-2">
+              可自定义录音存储目录，选择后立即生效。
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 p-3 bg-blue-50 rounded-md">
+          <p className="text-xs text-blue-800">
+            <strong>说明：</strong>数据库与模型统一存放在应用数据目录中集中管理；录音目录可自定义。
+          </p>
+        </div>
+      </div>
+
+      {/* Analytics Section */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+        <AnalyticsConsentSwitch />
+      </div>
+    </div>
+  )
+}
